@@ -9,7 +9,7 @@ import subprocess
 import collections
 
 
-VERSION = 1
+VERSION = 2
 FILENAMES = [os.path.expanduser("~/.ssh/config"), "/etc/ssh/ssh_config"]
 KEYS_BASE = os.path.expanduser("~/.ssh/keys")
 
@@ -17,6 +17,9 @@ if not getattr(collections, "OrderedDict"):
     print >>sys.stderr, "Runs only with Python 2.7"
     raise SystemExit
 
+
+def is_type(keytype):
+    return keytype.lower() in ("ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-dss", "ssh-rsa")
 
 def ask_yesno(text):
     answer = raw_input(text + " [y/N] ")
@@ -68,9 +71,9 @@ def merge_ssh_configs(*configs):
     return data
 
 
-def distribute_keys():
+def distribute_keys(args):
     config = merge_ssh_configs(*(parse_ssh_config(fname) for fname in FILENAMES))
-    if not config:
+    if not config or (len(args) and args[0] in ("-h", "--help")):
         print """
 SSH Key Distribution v%i
 
@@ -89,6 +92,7 @@ Edit/create your ~/.ssh/config file like the following:
 
 This will let this tool contact two hosts. On the first host, the file ~/.ssh/keys/foo.pub (from this machine) will be added to the remote authorized_keys file. If there is a key with the name gates@example.com present, it will be left intact. Every other key will generate a prompt. For the second host, only the key bar.pub will be uploaded with the option "no-pty". Furthermore, every machine will get the key master.pub.
 """ % (VERSION, )
+        return
 
     print "Distributing keys ..."
     for host in config:
@@ -105,17 +109,25 @@ This will let this tool contact two hosts. On the first host, the file ~/.ssh/ke
             if cmd == "DIST":
                 keyparts = param.split(" ", 1)
                 opts = ""
-                if keyparts == 2:
+                if len(keyparts) == 2:
                     opts = keyparts[1]
                 keyname = keyparts[0]
                 keyfilename = os.path.join(KEYS_BASE, keyname + ".pub")
                 keydata = file(keyfilename).read().strip()
+                first_part = keydata.split(" ", 1)[0]
+                has_opts = False
                 if opts:
-                    keydata += " " + opts
+                    has_opts = True
+                    if not is_type(first_part):
+                        keydata = opts + "," + keydata
+                    else:
+                        keydata = opts + " " + keydata
+                elif not is_type(first_part):
+                    has_opts = True
                 keyfileparts = keydata.split(" ", 3)
-                dist_keys_raw.add(keyfileparts[1])
+                dist_keys_raw.add(keyfileparts[1 + has_opts])
                 dist_keys.append(keydata)
-                dist_opts[keyfileparts[1]] = keyfileparts[3] if len(keyfileparts) > 3 else ""
+                dist_opts[keyfileparts[1 + has_opts]] = keyfileparts[0] if has_opts else ""
             elif cmd == "ACCEPT":
                 moniker = param
                 dist_keys_names.add(moniker)
@@ -132,10 +144,13 @@ This will let this tool contact two hosts. On the first host, the file ~/.ssh/ke
                 legacy_keys.append(key)
                 continue
             keyparts = key.split(" ", 3)
-            keyname = keyparts[2]
-            keyraw = keyparts[1]
-            keyparts.append("")
-            keyopts = keyparts[3]
+            has_opts = not is_type(keyparts[0])
+            keyname = keyparts[2 + has_opts]
+            keyraw = keyparts[1 + has_opts]
+            if has_opts:
+                keyopts = keyparts[0]
+            else:
+                keyopts = ""
             if keyname not in dist_keys_names and keyraw not in dist_keys_raw:
                 if not ask_yesno("Unknown key found (%s, opts %s) - remove this key?" % (keyname, keyopts)):
                     legacy_keys.append(key)
@@ -145,7 +160,13 @@ This will let this tool contact two hosts. On the first host, the file ~/.ssh/ke
             if (keyraw in dist_opts or keyopts) and keyopts != dist_opts[keyraw]:
                 if not ask_yesno("Update key options (%s) [from: %r, to: %r]?" % (keyname, keyopts, dist_opts.get(keyraw, None))):
                     legacy_keys.append(key)
-                    dist_keys = [k for k in dist_keys if (k + " XXX").split(" ", 3)[1] != keyraw]
+                    dist_keys_new = []
+                    for k in dist_keys:
+                        parts = k.split(" ", 3)
+                        has_opts = not is_type(parts[0])
+                        if k[1 + has_opts] != keyraw:
+                            dist_keys_new.append(k)
+                    dist_keys = dist_keys_new
         new_keys = []
         if legacy_keys:
             new_keys.extend(legacy_keys)
@@ -167,5 +188,5 @@ This will let this tool contact two hosts. On the first host, the file ~/.ssh/ke
 
 
 if __name__ == '__main__':
-    distribute_keys()
+    distribute_keys(sys.argv[1:])
 
